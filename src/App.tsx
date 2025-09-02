@@ -6,7 +6,7 @@ import './styles/tailwind.css'
 import {
   createSession, joinSession, joinByCode, observeSession, observeOpenSessions,
   recordJylySet, recordAtwSet, recordLadderSet, recordT21Set, recordRaceSet,
-  endSessionAndSave, fetchGlobalLeaderboard,
+  endSessionAndSave, fetchGlobalLeaderboard, deleteSession,
   type Session, type Player, type Game,
 } from './components/session'
 import { applyJylySet, createJyly } from './components/JylyEngine'
@@ -81,6 +81,13 @@ export default function App() {
     unsubRef.current = null
     setSession(null)
   }
+  useEffect(() => {
+    if (session?.status === 'closed') {
+      alert('Session ended and saved to leaderboard.')
+      leaveRoom()
+    }
+  }, [session?.status])
+  
 
   // spectator view
   if (spectator) {
@@ -198,6 +205,22 @@ export default function App() {
                       }}>Join</button>
                       <a className="px-3 py-1 rounded-xl bg-neutral-900 border border-neutral-800"
                          href={`/?spectator=1&session=${r.id}`} target="_blank">Spectate</a>
+                         {r.ownerUid === user.uid && (
+  <button
+    className="px-3 py-1 rounded-xl bg-red-600"
+    onClick={async () => {
+      if (!confirm(`Delete room "${r.name || r.code}"?`)) return
+      try {
+        await deleteSession(r.id)
+      } catch (e: any) {
+        alert('Delete failed: ' + (e?.message || e))
+      }
+    }}
+  >
+    Delete
+  </button>
+)}
+
                     </div>
                   </li>
                 ))}
@@ -248,8 +271,10 @@ function JylyRoom({ session, meUid }: { session: Session; meUid: string }) {
   if(!me?.jyly) return <div>Joining…</div>
   const s = me.jyly
   const click = async(n:number)=> {
-    const next = applyJylySet(s, n)
-    await recordJylySet(session.id, meUid, next, next.history.at(-1)!.points)
+    const next = applyJylySet(myState, n)
+const last = next.history[next.history.length - 1]
+await recordJylySet(session.id, meUid, next, last ? last.points : 0)
+
   }
   return (
     <Card title={`JYLY • ${session.name || session.code}`} subtitle={`Code ${session.code} • Players ${session.players.length}`}>

@@ -2,7 +2,8 @@
 import { db } from '../firebase'
 import {
   collection, doc, serverTimestamp, setDoc, getDoc, getDocs,
-  onSnapshot, updateDoc, arrayUnion, query, where, orderBy, limit, addDoc
+  onSnapshot, updateDoc, arrayUnion, query, where, orderBy, limit,
+  addDoc, deleteDoc
 } from 'firebase/firestore'
 import type { JylyState } from './JylyEngine'
 import type { AtwState } from './AtwEngine'
@@ -21,7 +22,6 @@ export type Player = {
   uid: string
   name: string
   photoURL?: string
-  // täidetud on ainult vastava mängu väli
   jyly?: JylyState
   atw?: AtwState
   ladder?: LadderState
@@ -33,8 +33,8 @@ export type Player = {
 
 export type Session = {
   id: string
-  code: string               // 5-kohaline kood
-  name?: string              // vabatahtlik nimi
+  code: string
+  name?: string
   ownerUid: string
   game: Game
   createdAt?: any
@@ -49,9 +49,9 @@ function randomCode(len = 5) {
     .join('')
 }
 
-/** Host loob ruumi (EI liitu). Tagastab {id, code}. */
+/** Host loob ruumi (ei liitu automaatselt). */
 export async function createSession(
-  ownerUid: string, game: Game, name?: string,
+  ownerUid: string, game: Game, name?: string
 ): Promise<{ id: string; code: string }> {
   const code = randomCode()
   const ref = doc(collection(db, 'sessions'))
@@ -69,7 +69,12 @@ export async function createSession(
   return { id: ref.id, code }
 }
 
-/** Liitu ID järgi – pannakse õige algseisund. */
+/** Ruumi kustutamine (näitame UI-s ainult loojale). */
+export async function deleteSession(sessionId: string) {
+  await deleteDoc(doc(db, 'sessions', sessionId))
+}
+
+/** Liitu ID järgi – saab õige algseisundi. */
 export async function joinSession(sessionId: string, player: Player) {
   const ref = doc(db, 'sessions', sessionId)
   const snap = await getDoc(ref)
@@ -94,7 +99,7 @@ export async function joinSession(sessionId: string, player: Player) {
   }
 }
 
-/** Ava ruumid (lobby/live) – viimased 25. */
+/** Ava/live ruumid listi jaoks. */
 export function observeOpenSessions(cb: (rows: Session[]) => void) {
   const qy = query(collection(db, 'sessions'), orderBy('createdAt', 'desc'), limit(25))
   return onSnapshot(qy, (sn) => {
@@ -104,14 +109,14 @@ export function observeOpenSessions(cb: (rows: Session[]) => void) {
   })
 }
 
-/** Leia sessioon koodi järgi. */
+/** Leia sess koodi järgi. */
 export async function resolveSessionIdByCode(code: string): Promise<string | null> {
   const qy = query(collection(db, 'sessions'), where('code', '==', code.toUpperCase()), limit(1))
   const sn = await getDocs(qy)
   return sn.empty ? null : sn.docs[0].id
 }
 
-/** Liitu koodi järgi, tagasta sessiooni ID. */
+/** Liitu koodiga. */
 export async function joinByCode(code: string, player: Player): Promise<string> {
   const id = await resolveSessionIdByCode(code)
   if (!id) throw new Error('Session not found')
@@ -124,44 +129,54 @@ export function observeSession(sessionId: string, cb: (s: Session) => void) {
   return onSnapshot(ref, (snap) => { if (snap.exists()) cb({ id: snap.id, ...(snap.data() as any) }) })
 }
 
-/** JYLY set */
-export async function recordJylySet(sessionId: string, uid: string, next: JylyState, points: number) {
-  await bumpPlayer(sessionId, uid, { jyly: next }, points)
-}
-/** ATW set */
-export async function recordAtwSet(sessionId: string, uid: string, next: AtwState, points: number) {
-  await bumpPlayer(sessionId, uid, { atw: next }, points)
-}
-/** Ladder set */
-export async function recordLadderSet(sessionId: string, uid: string, next: LadderState, points: number) {
-  await bumpPlayer(sessionId, uid, { ladder: next }, points)
-}
-/** 21 set */
-export async function recordT21Set(sessionId: string, uid: string, next: T21State, points: number) {
-  await bumpPlayer(sessionId, uid, { t21: next }, points)
-}
-/** Race set */
-export async function recordRaceSet(sessionId: string, uid: string, next: RaceState, points: number) {
-  await bumpPlayer(sessionId, uid, { race: next }, points)
-}
+/** ——— Skooride salvestamine ——— */
 
-async function bumpPlayer(sessionId: string, uid: string, patch: Partial<Player>, points: number) {
+export async function recordJylySet(sessionId: string, uid: string, next: JylyState, points: number) {
   const ref = doc(db, 'sessions', sessionId)
   const snap = await getDoc(ref)
   if (!snap.exists()) throw new Error('Session not found')
-  const data = snap.data() as Session
-  const updated = (data.players || []).map((p) =>
+  const s = snap.data() as Session
+
+  const updated = (s.players || []).map((p) =>
+    p.uid === uid ? { ...p, jyly: next, totalPoints: (p.totalPoints || 0) + points } : p
+  )
+  await updateDoc(ref, { players: updated })
+
+  // AUTOFINISH: JYLY lõppeb, kui KÕIGIL on 20 setti tehtud
+  const everyoneDone = updated.length > 0 && updated.every(p => p.jyly && p.jyly.history.length >= 20)
+  if (everyoneDone) {
+    await endSessionAndSave({ ...s, players: updated })
+  }
+}
+
+export async function recordAtwSet(sessionId: string, uid: string, next: AtwState, points: number) {
+  await bump(sessionId, uid, { atw: next }, points)
+}
+export async function recordLadderSet(sessionId: string, uid: string, next: LadderState, points: number) {
+  await bump(sessionId, uid, { ladder: next }, points)
+}
+export async function recordT21Set(sessionId: string, uid: string, next: T21State, points: number) {
+  await bump(sessionId, uid, { t21: next }, points)
+}
+export async function recordRaceSet(sessionId: string, uid: string, next: RaceState, points: number) {
+  await bump(sessionId, uid, { race: next }, points)
+}
+
+async function bump(sessionId: string, uid: string, patch: Partial<Player>, points: number) {
+  const ref = doc(db, 'sessions', sessionId)
+  const snap = await getDoc(ref)
+  if (!snap.exists()) throw new Error('Session not found')
+  const s = snap.data() as Session
+  const updated = (s.players || []).map(p =>
     p.uid === uid ? { ...p, ...patch, totalPoints: (p.totalPoints || 0) + points } : p
   )
   await updateDoc(ref, { players: updated })
 }
 
-/** Sulge ruum ja salvesta globaalsesse LB-sse. */
+/** Lõpeta sessioon ja kirjuta globaalsesse leaderboardi kokkuvõtted. */
 export async function endSessionAndSave(session: Session) {
   const ref = doc(db, 'sessions', session.id)
-  // 1) märgi kinni
   await updateDoc(ref, { status: 'closed' })
-  // 2) kirjuta kokkuvõtted leaderboardi
   await Promise.all(
     (session.players || []).map((p) =>
       addDoc(collection(db, 'leaderboard'), {
@@ -177,17 +192,14 @@ export async function endSessionAndSave(session: Session) {
   )
 }
 
-/** Loe globaalse leaderboardi ridu (lihtne perioodifilter). */
+/** Globaalne leaderboard (lihtne perioodifilter). */
 export async function fetchGlobalLeaderboard(days?: number, game?: Game) {
-  // lihtsuse mõttes: võtame viimased 200 kirjet ja summeerime kliendis
   const qy = query(collection(db, 'leaderboard'), orderBy('createdAt', 'desc'), limit(200))
   const sn = await getDocs(qy)
   const now = Date.now()
   const rows = sn.docs.map((d) => ({ id: d.id, ...(d.data() as any) }))
     .filter((r) => !days || (r.createdAt?.toMillis?.() ?? now) >= now - days * 864e5)
     .filter((r) => !game || r.game === game)
-
-  // summeeri kasutaja lõikes
   const map = new Map<string, { uid: string; name: string; points: number }>()
   for (const r of rows) {
     const k = r.uid
