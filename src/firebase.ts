@@ -1,11 +1,10 @@
-
 import { initializeApp } from 'firebase/app'
 import {
   getAuth,
   GoogleAuthProvider,
-  signInWithRedirect,
   getRedirectResult,
-  signOut,
+  setPersistence,
+  browserLocalPersistence,
 } from 'firebase/auth'
 import { getFirestore } from 'firebase/firestore'
 
@@ -21,17 +20,19 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig)
 
 export const auth = getAuth(app)
-export const db = getFirestore(app)
+auth.useDeviceLanguage()
+setPersistence(auth, browserLocalPersistence).catch(() => {})
+
 export const googleProvider = new GoogleAuthProvider()
 
-export function signInWithGoogle(){
-  return signInWithRedirect(auth, googleProvider)
-}
-export function completeRedirect(){
-  return getRedirectResult(auth)
-}
-export function logOut(){
-  return signOut(auth)
+export async function completeRedirect() {
+  try {
+    const res = await getRedirectResult(auth)
+    return !!res?.user
+  } catch (e) {
+    console.error('completeRedirect error:', e)
+    return false
+  }
 }
 
-console.log('Firebase projectId:', firebaseConfig.projectId)
+export const db = getFirestore(app)

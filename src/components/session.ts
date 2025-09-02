@@ -83,21 +83,40 @@ export async function joinSession(sessionId: string, player: Player) {
 
   const exists = (s.players || []).some((p) => p.uid === player.uid)
   if (!exists) {
-    const joined: Player = {
+    const base: any = {
       uid: player.uid,
-      name: player.name,
-      photoURL: player.photoURL,
+      name: player.name || 'Player',
       totalPoints: 0,
       joinedAt: new Date(),
-      ...(s.game === 'JYLY'   ? { jyly:   createJyly() } :
-        s.game === 'ATW'     ? { atw:    createAtw() } :
-        s.game === 'LADDER'  ? { ladder: createLadder() } :
-        s.game === 'T21'     ? { t21:    createT21() } :
-                               { race:   createRace() }),
     }
+    if (player.photoURL) base.photoURL = player.photoURL
+
+    const joined: Player =
+      s.game === 'JYLY'   ? { ...base, jyly: createJyly() } :
+      s.game === 'ATW'    ? { ...base, atw: createAtw() } :
+      s.game === 'LADDER' ? { ...base, ladder: createLadder() } :
+      s.game === 'T21'    ? { ...base, t21: createT21() } :
+                            { ...base, race: createRace() }
+
     await updateDoc(ref, { players: arrayUnion(joined), status: 'live' })
   }
 }
+export async function saveJylyState(sessionId: string, uid: string, newState: JylyState) {
+  const ref = doc(db, 'sessions', sessionId)
+  const snap = await getDoc(ref)
+  if (!snap.exists()) throw new Error('Session not found')
+  const s = snap.data() as Session
+
+  // arvuta punktid otse seisust (vältimaks sumJylyPoints importi)
+  const total =
+    (newState.history ?? []).reduce((acc, h: any) => acc + (h.points ?? 0), 0)
+
+  const updated = (s.players || []).map((p) =>
+    p.uid === uid ? { ...p, jyly: newState, totalPoints: total } : p
+  )
+  await updateDoc(ref, { players: updated })
+}
+
 
 /** Ava/live ruumid listi jaoks. */
 export function observeOpenSessions(cb: (rows: Session[]) => void) {

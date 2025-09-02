@@ -4,12 +4,12 @@ import { auth, completeRedirect } from './firebase'
 import SignIn from './components/SignIn'
 import './styles/tailwind.css'
 import {
-  createSession, joinSession, joinByCode, observeSession, observeOpenSessions,
-  recordJylySet, recordAtwSet, recordLadderSet, recordT21Set, recordRaceSet,
-  endSessionAndSave, fetchGlobalLeaderboard, deleteSession,
+  createSession, joinSession, joinByCode, observeSession, observeOpenSessions
+  , recordAtwSet, recordLadderSet, recordT21Set, recordRaceSet,
+  endSessionAndSave, fetchGlobalLeaderboard, deleteSession, saveJylyState,
   type Session, type Player, type Game,
 } from './components/session'
-import { applyJylySet, createJyly } from './components/JylyEngine'
+import { applyJylySet, rebuildJylyFromMakes } from './components/JylyEngine'
 import { applyAtwSet, createAtw } from './components/AtwEngine'
 import { applyLadderSet, createLadder } from './components/LadderEngine'
 import { applyT21Set, createT21 } from './components/TwentyOneEngine'
@@ -267,24 +267,118 @@ function Spectator({ session }: { session: Session }) {
 }
 
 function JylyRoom({ session, meUid }: { session: Session; meUid: string }) {
-  const me = useMemo(()=>session.players.find(p=>p.uid===meUid),[session,meUid])
-  if(!me?.jyly) return <div>Joining…</div>
-  const s = me.jyly
-  const click = async(n:number)=> {
-    const next = applyJylySet(myState, n)
-const last = next.history[next.history.length - 1]
-await recordJylySet(session.id, meUid, next, last ? last.points : 0)
+  const me = useMemo(() => session.players.find((p) => p.uid === meUid), [session, meUid])
+  if (!me || !me.jyly) return <div>Joining…</div>
 
+  const myState = me.jyly
+  const [idx, setIdx] = useState(() =>
+    Math.min(myState.history.length, myState.targetSets - 1)
+  )
+  // kui seis muutub (teine seade vms), hüppa uue "järgmise" peale
+  useEffect(() => {
+    const nextIndex = Math.min(
+      myState.history.length, // "next" positsioon (või viimane, kui täis)
+      myState.targetSets - 1
+    )
+    setIdx(nextIndex)
+  }, [myState.history.length, myState.targetSets])
+
+  const canAppend = myState.history.length < myState.targetSets
+  const maxSelectable = canAppend ? myState.history.length : myState.targetSets - 1
+  const viewingExisting = idx < myState.history.length
+
+  const viewingDistance =
+    viewingExisting ? myState.history[idx].distanceM : myState.distanceM
+
+  const roundLabel = `${idx + 1} / ${myState.targetSets}`
+
+  async function submitMakes(n: number) {
+    if (viewingExisting) {
+      // Muudame olemasolevat seeriat
+      const makesArr = myState.history.map((h) => h.makes)
+      makesArr[idx] = n
+      const next = rebuildJylyFromMakes(makesArr)
+      await saveJylyState(session.id, meUid, next)
+    } else {
+      // Lisame uue seeria (kui pole veel 20 täis)
+      if (!canAppend) return
+      const next = applyJylySet(myState, n)
+      await saveJylyState(session.id, meUid, next)
+    }
   }
+
   return (
-    <Card title={`JYLY • ${session.name || session.code}`} subtitle={`Code ${session.code} • Players ${session.players.length}`}>
-      <BigLine main={`${s.distanceM} m`} sub="Put from here • Enter makes (0–5)" />
-      <Pick onPick={click} />
-      <Points me={me} note={s.history.map(h=>`${h.makes}/5 @${h.distanceM}m (+${h.points})`).join(' · ')} />
+    <div className="space-y-4">
+      <div className="rounded-2xl border border-neutral-800 p-4">
+        <div className="text-lg font-semibold tracking-wide">JYLY • {session.name || session.code}</div>
+        <div className="mt-1 text-sm text-neutral-400">
+          Code: <span className="font-mono">{session.code}</span> • Players: {session.players.length}
+        </div>
+      </div>
+
+      <div className="rounded-2xl border border-neutral-800 p-4">
+        <div className="flex items-center justify-between">
+          <div className="text-sm text-neutral-400">Round</div>
+          <div className="flex items-center gap-2">
+            <button
+              className="px-3 py-1 rounded-xl bg-neutral-800 disabled:opacity-40"
+              onClick={() => setIdx((i) => Math.max(0, i - 1))}
+              disabled={idx <= 0}
+            >
+              ←
+            </button>
+            <div className="text-sm font-medium">{roundLabel}</div>
+            <button
+              className="px-3 py-1 rounded-xl bg-neutral-800 disabled:opacity-40"
+              onClick={() => setIdx((i) => Math.min(maxSelectable, i + 1))}
+              disabled={idx >= maxSelectable}
+            >
+              →
+            </button>
+          </div>
+        </div>
+
+        <div className="mt-2 text-5xl font-bold">{viewingDistance} m</div>
+        <div className="text-neutral-400">
+          {viewingExisting
+            ? 'Editing this round • choose 0–5'
+            : canAppend
+              ? 'Put from here • Enter makes (0–5)'
+              : 'Completed • you can still edit previous rounds'}
+        </div>
+
+        <div className="mt-3 grid grid-cols-6 gap-2">
+          {[0, 1, 2, 3, 4, 5].map((n) => (
+            <button
+              key={n}
+              className="rounded-xl py-2 bg-neutral-800 hover:bg-neutral-700 disabled:opacity-40"
+              onClick={() => submitMakes(n)}
+              disabled={!canAppend && !viewingExisting} // kui täis ja vaatame "nexti", siis disable
+            >
+              {n}
+            </button>
+          ))}
+        </div>
+
+        <div className="mt-3 text-sm">
+          Points: <span className="font-semibold">{me.totalPoints}</span>
+        </div>
+        <div className="mt-1 text-xs text-neutral-400">
+          History:{' '}
+          {myState.history.length
+            ? myState.history
+                .map((h, i) => `${i + 1}) ${h.makes}/5 @${h.distanceM}m (+${h.points})`)
+                .join(' · ')
+            : '—'}
+        </div>
+      </div>
+
       <Leaderboard session={session} />
-    </Card>
+    </div>
   )
 }
+
+
 
 function AtwRoom({ session, meUid }: { session: Session; meUid: string }) {
   const me = useMemo(()=>session.players.find(p=>p.uid===meUid),[session,meUid])
