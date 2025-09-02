@@ -107,15 +107,14 @@ export async function saveJylyState(sessionId: string, uid: string, newState: Jy
   if (!snap.exists()) throw new Error('Session not found')
   const s = snap.data() as Session
 
-  // arvuta punktid otse seisust (vältimaks sumJylyPoints importi)
-  const total =
-    (newState.history ?? []).reduce((acc, h: any) => acc + (h.points ?? 0), 0)
+  const total = (newState.history ?? []).reduce((acc, h: any) => acc + (h.points ?? 0), 0)
 
   const updated = (s.players || []).map((p) =>
     p.uid === uid ? { ...p, jyly: newState, totalPoints: total } : p
   )
   await updateDoc(ref, { players: updated })
 }
+
 
 
 /** Ava/live ruumid listi jaoks. */
@@ -150,23 +149,23 @@ export function observeSession(sessionId: string, cb: (s: Session) => void) {
 
 /** ——— Skooride salvestamine ——— */
 
-export async function recordJylySet(sessionId: string, uid: string, next: JylyState, points: number) {
+export async function recordJylySet(sessionId: string, uid: string, next: JylyState, _pointsIgnored: number) {
   const ref = doc(db, 'sessions', sessionId)
   const snap = await getDoc(ref)
   if (!snap.exists()) throw new Error('Session not found')
   const s = snap.data() as Session
 
+  // arvuta kogu punktid seisust (toetab ka tagantjärele parandusi)
+  const total = (next.history ?? []).reduce((acc, h: any) => acc + (h.points ?? 0), 0)
+
   const updated = (s.players || []).map((p) =>
-    p.uid === uid ? { ...p, jyly: next, totalPoints: (p.totalPoints || 0) + points } : p
+    p.uid === uid ? { ...p, jyly: next, totalPoints: total } : p
   )
   await updateDoc(ref, { players: updated })
 
-  // AUTOFINISH: JYLY lõppeb, kui KÕIGIL on 20 setti tehtud
-  const everyoneDone = updated.length > 0 && updated.every(p => p.jyly && p.jyly.history.length >= 20)
-  if (everyoneDone) {
-    await endSessionAndSave({ ...s, players: updated })
-  }
+  // NB: sihilikult EI tee endSessionAndSave siinkohal!
 }
+
 
 export async function recordAtwSet(sessionId: string, uid: string, next: AtwState, points: number) {
   await bump(sessionId, uid, { atw: next }, points)

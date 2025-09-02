@@ -3,13 +3,14 @@ import { onAuthStateChanged } from 'firebase/auth'
 import { auth, completeRedirect } from './firebase'
 import SignIn from './components/SignIn'
 import './styles/tailwind.css'
+import { applyJylySet, rebuildJylyFromMakes } from './components/JylyEngine'
 import {
   createSession, joinSession, joinByCode, observeSession, observeOpenSessions
   , recordAtwSet, recordLadderSet, recordT21Set, recordRaceSet,
   endSessionAndSave, fetchGlobalLeaderboard, deleteSession, saveJylyState,
   type Session, type Player, type Game,
 } from './components/session'
-import { applyJylySet, rebuildJylyFromMakes } from './components/JylyEngine'
+
 import { applyAtwSet, createAtw } from './components/AtwEngine'
 import { applyLadderSet, createLadder } from './components/LadderEngine'
 import { applyT21Set, createT21 } from './components/TwentyOneEngine'
