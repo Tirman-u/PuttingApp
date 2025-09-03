@@ -1,3 +1,4 @@
+// src/components/JylyEngine.ts
 export type JylyHistoryItem = {
   distanceM: number
   makes: number
@@ -10,39 +11,35 @@ export type JylyState = {
   targetSets: number
 }
 
-/** Algseis (kui sul oli teistsugune algdistants, jäta samaks) */
+/** Algseis — soovi korral muuda algdistantsi või seeriate arvu */
 export function createJyly(): JylyState {
   return { distanceM: 10, history: [], targetSets: 20 }
 }
 
-/**
- * Rakenda üks seeria.
- * NB! Punktiloogika jäta samaks nagu sul varem oli.
- * Siin on näidis: 1p per make.
- */
+/** Punktiarvutus — muuda vastavalt oma reeglile (hetkel 1p per make) */
+function score(makes: number) {
+  return makes
+}
+
+/** Kui tahad distantsi muuta voorude vahel, arvuta siin. */
+function nextDistance(prev: JylyState) {
+  return prev.distanceM
+}
+
+/** Lisa üks set lõppu */
 export function applyJylySet(state: JylyState, makes: number): JylyState {
-  const points = makes // <- kohanda kui sul on teine loogika
-  const next: JylyState = {
-    distanceM: state.distanceM, // kui sul oli distantsi muutus, arvuta siin
-    history: [...state.history, { distanceM: state.distanceM, makes, points }],
+  const points = score(makes)
+  const item: JylyHistoryItem = { distanceM: state.distanceM, makes, points }
+  return {
+    distanceM: nextDistance(state),
+    history: [...state.history, item],
     targetSets: state.targetSets,
   }
-  return next
 }
 
-/** Summaarne punktisumma seisust */
-export function sumJylyPoints(s: JylyState): number {
-  return s.history.reduce((acc, h) => acc + (h.points || 0), 0)
-}
-
-/**
- * Ehita seis nullist, kui teame kõigi seeriate 'makes' massiivi.
- * Kasutame paranduste korral: muudame ühe elemendi ja arvutame kogu ajaloo uuesti.
- */
+/** Ehita seis algusest, kui on teada kõigi set’ide makes */
 export function rebuildJylyFromMakes(makesArr: number[]): JylyState {
   let s = createJyly()
-  for (const m of makesArr) {
-    s = applyJylySet(s, m)
-  }
+  for (const m of makesArr) s = applyJylySet(s, m)
   return s
 }

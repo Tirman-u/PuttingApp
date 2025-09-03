@@ -1,15 +1,32 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useState, useRef } from 'react'
 import { onAuthStateChanged } from 'firebase/auth'
 import { auth, completeRedirect } from './firebase'
 import SignIn from './components/SignIn'
 import './styles/tailwind.css'
+import Spectator from './screens/Spectator'
+
 import { applyJylySet, rebuildJylyFromMakes } from './components/JylyEngine'
+
 import {
-  createSession, joinSession, joinByCode, observeSession, observeOpenSessions
-  , recordAtwSet, recordLadderSet, recordT21Set, recordRaceSet,
-  endSessionAndSave, fetchGlobalLeaderboard, deleteSession, saveJylyState,
-  type Session, type Player, type Game,
+  createSession,
+  joinSession,
+  joinByCode,
+  observeSession,
+  observeOpenSessions,     // ← vajalik “Available rooms” jaoks
+  saveJylyState,           // ← JYLY salvestus
+  recordAtwSet,
+  recordLadderSet,
+  recordT21Set,
+  recordRaceSet,
+  endSessionAndSave,       // ← ainult hosti “End Session” nupp
+  fetchGlobalLeaderboard,
+  deleteSession,           // ← kui omanik saab ruumi kustutada listist
+  type Session,
+  type Player,
+  type Game,
 } from './components/session'
+
+
 
 import { applyAtwSet, createAtw } from './components/AtwEngine'
 import { applyLadderSet, createLadder } from './components/LadderEngine'
@@ -22,7 +39,16 @@ const useAuth = create<AuthState>(() => ({ user: null }))
 
 const GAMES: Game[] = ['JYLY', 'ATW', 'LADDER', 'T21', 'RACE']
 
+// kui URL-is on ?screen=<sessionId>, näita big-screen vaadet
+const screenId = new URLSearchParams(location.search).get('screen')
+if (screenId) return <Spectator sessionId={screenId} />
+
+
 export default function App() {
+  /* SCREEN_CHECK */
+  const screenId = new URLSearchParams(window.location.search).get('screen');
+  if (screenId) return <Spectator sessionId={screenId} />;
+
   const { user } = useAuth()
   const [session, setSession] = useState<Session | null>(null)
   const [game, setGame] = useState<Game>('JYLY')
@@ -267,41 +293,79 @@ function Spectator({ session }: { session: Session }) {
   )
 }
 
+function StatsCard({
+  history,
+  totalPoints,
+}: {
+  history: { makes: number; distanceM: number; points: number }[]
+  totalPoints: number
+}) {
+  const rounds = history.length
+  const attempts = rounds * 5
+  const makes = history.reduce((a, h) => a + (h.makes ?? 0), 0)
+  const pct = attempts ? Math.round((makes / attempts) * 100) : 0
+  const avg = rounds ? (makes / rounds).toFixed(2) : '0.00'
+  const best = history.reduce((m, h) => Math.max(m, h.makes ?? 0), 0)
+
+  return (
+    <div className="rounded-2xl border border-neutral-800 p-4 bg-neutral-900/40">
+      <div className="text-lg font-semibold mb-2">Your JYLY summary</div>
+      <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 text-sm">
+        <div className="p-3 rounded-xl bg-neutral-800/60">
+          <div className="text-neutral-400">Rounds</div>
+          <div className="text-xl font-semibold">{rounds}</div>
+        </div>
+        <div className="p-3 rounded-xl bg-neutral-800/60">
+          <div className="text-neutral-400">Total makes</div>
+          <div className="text-xl font-semibold">{makes}</div>
+        </div>
+        <div className="p-3 rounded-xl bg-neutral-800/60">
+          <div className="text-neutral-400">Make %</div>
+          <div className="text-xl font-semibold">{pct}%</div>
+        </div>
+        <div className="p-3 rounded-xl bg-neutral-800/60">
+          <div className="text-neutral-400">Avg / round</div>
+          <div className="text-xl font-semibold">{avg}</div>
+        </div>
+        <div className="p-3 rounded-xl bg-neutral-800/60">
+          <div className="text-neutral-400">Points</div>
+          <div className="text-xl font-semibold">{totalPoints}</div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function JylyRoom({ session, meUid }: { session: Session; meUid: string }) {
   const me = useMemo(() => session.players.find((p) => p.uid === meUid), [session, meUid])
   if (!me || !me.jyly) return <div>Joining…</div>
 
   const myState = me.jyly
+
   const [idx, setIdx] = useState(() =>
     Math.min(myState.history.length, myState.targetSets - 1)
   )
-  // kui seis muutub (teine seade vms), hüppa uue "järgmise" peale
   useEffect(() => {
-    const nextIndex = Math.min(
-      myState.history.length, // "next" positsioon (või viimane, kui täis)
-      myState.targetSets - 1
-    )
+    const nextIndex = Math.min(myState.history.length, myState.targetSets - 1)
     setIdx(nextIndex)
   }, [myState.history.length, myState.targetSets])
 
   const canAppend = myState.history.length < myState.targetSets
   const maxSelectable = canAppend ? myState.history.length : myState.targetSets - 1
   const viewingExisting = idx < myState.history.length
-
-  const viewingDistance =
-    viewingExisting ? myState.history[idx].distanceM : myState.distanceM
-
+  const selectedMakes = viewingExisting ? myState.history[idx].makes : null
+  const viewingDistance = viewingExisting ? myState.history[idx].distanceM : myState.distanceM
   const roundLabel = `${idx + 1} / ${myState.targetSets}`
+  const done = myState.history.length >= myState.targetSets
+  const isOwner = session.ownerUid === meUid
 
   async function submitMakes(n: number) {
     if (viewingExisting) {
-      // Muudame olemasolevat seeriat
       const makesArr = myState.history.map((h) => h.makes)
       makesArr[idx] = n
       const next = rebuildJylyFromMakes(makesArr)
       await saveJylyState(session.id, meUid, next)
     } else {
-      // Lisame uue seeria (kui pole veel 20 täis)
       if (!canAppend) return
       const next = applyJylySet(myState, n)
       await saveJylyState(session.id, meUid, next)
@@ -310,32 +374,51 @@ function JylyRoom({ session, meUid }: { session: Session; meUid: string }) {
 
   return (
     <div className="space-y-4">
+      {/* Header */}
       <div className="rounded-2xl border border-neutral-800 p-4">
-        <div className="text-lg font-semibold tracking-wide">JYLY • {session.name || session.code}</div>
+        <div className="text-lg font-semibold tracking-wide">
+          JYLY • {session.name || session.code}
+        </div>
         <div className="mt-1 text-sm text-neutral-400">
           Code: <span className="font-mono">{session.code}</span> • Players: {session.players.length}
         </div>
       </div>
 
+      {/* Overview riba */}
+      <div className="rounded-2xl border border-neutral-800 p-3">
+        <div className="text-xs text-neutral-400 mb-2">Rounds overview (makes)</div>
+        <div className="flex flex-wrap gap-1">
+          {Array.from({ length: myState.targetSets }).map((_, i) => {
+            const rec = myState.history[i]
+            const isCur = i === idx
+            return (
+              <div
+                key={i}
+                className={[
+                  'px-2 py-1 rounded-lg font-mono text-xs',
+                  rec ? 'bg-neutral-800' : 'bg-neutral-900 border border-neutral-800',
+                  isCur ? 'ring-2 ring-sky-500' : '',
+                ].join(' ')}
+              >
+                {i + 1}: {rec ? rec.makes : '-'}
+              </div>
+            )
+          })}
+        </div>
+      </div>
+
+      {/* Põhikaart */}
       <div className="rounded-2xl border border-neutral-800 p-4">
         <div className="flex items-center justify-between">
           <div className="text-sm text-neutral-400">Round</div>
           <div className="flex items-center gap-2">
-            <button
-              className="px-3 py-1 rounded-xl bg-neutral-800 disabled:opacity-40"
-              onClick={() => setIdx((i) => Math.max(0, i - 1))}
-              disabled={idx <= 0}
-            >
-              ←
-            </button>
+            <button className="px-3 py-1 rounded-xl bg-neutral-800 disabled:opacity-40"
+                    onClick={() => setIdx((i) => Math.max(0, i - 1))}
+                    disabled={idx <= 0}>←</button>
             <div className="text-sm font-medium">{roundLabel}</div>
-            <button
-              className="px-3 py-1 rounded-xl bg-neutral-800 disabled:opacity-40"
-              onClick={() => setIdx((i) => Math.min(maxSelectable, i + 1))}
-              disabled={idx >= maxSelectable}
-            >
-              →
-            </button>
+            <button className="px-3 py-1 rounded-xl bg-neutral-800 disabled:opacity-40"
+                    onClick={() => setIdx((i) => Math.min(maxSelectable, i + 1))}
+                    disabled={idx >= maxSelectable}>→</button>
           </div>
         </div>
 
@@ -352,29 +435,50 @@ function JylyRoom({ session, meUid }: { session: Session; meUid: string }) {
           {[0, 1, 2, 3, 4, 5].map((n) => (
             <button
               key={n}
-              className="rounded-xl py-2 bg-neutral-800 hover:bg-neutral-700 disabled:opacity-40"
+              className={[
+                'rounded-xl py-2 bg-neutral-800 hover:bg-neutral-700 disabled:opacity-40',
+                selectedMakes === n ? 'ring-2 ring-sky-500 bg-sky-900/30' : '',
+              ].join(' ')}
               onClick={() => submitMakes(n)}
-              disabled={!canAppend && !viewingExisting} // kui täis ja vaatame "nexti", siis disable
+              disabled={!canAppend && !viewingExisting}
             >
               {n}
             </button>
           ))}
         </div>
 
-        <div className="mt-3 text-sm">
-          Points: <span className="font-semibold">{me.totalPoints}</span>
-        </div>
+        <div className="mt-3 text-sm">Points: <span className="font-semibold">{me.totalPoints}</span></div>
         <div className="mt-1 text-xs text-neutral-400">
           History:{' '}
           {myState.history.length
-            ? myState.history
-                .map((h, i) => `${i + 1}) ${h.makes}/5 @${h.distanceM}m (+${h.points})`)
-                .join(' · ')
+            ? myState.history.map((h, i) => `${i + 1}) ${h.makes}/5 @${h.distanceM}m (+${h.points})`).join(' · ')
             : '—'}
         </div>
       </div>
 
+      {/* Kui mängijal on 20/20, näita isiklikku kokkuvõtet */}
+      {done && <StatsCard history={myState.history} totalPoints={me.totalPoints} />}
+
       <Leaderboard session={session} />
+
+      {/* End Session – ainult host ja ka topelt-kontroll kliendis */}
+      {isOwner && (
+        <button
+          className="w-full rounded-2xl bg-red-600 py-4 font-semibold"
+          onClick={async () => {
+            if (auth.currentUser?.uid !== session.ownerUid) {
+              alert('Only the host can end this session.')
+              return
+            }
+            if (confirm('End session and save to Global Leaderboard?')) {
+              await endSessionAndSave(session)
+              alert('Session ended and saved to leaderboard.')
+            }
+          }}
+        >
+          End Session → Save to Global Leaderboard
+        </button>
+      )}
     </div>
   )
 }
