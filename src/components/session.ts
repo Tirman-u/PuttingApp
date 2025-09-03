@@ -14,176 +14,181 @@ import {
   setDoc,
   updateDoc,
   where,
-  writeBatch,
-  type Unsubscribe,
-} from 'firebase/firestore'
-import { db } from '../firebase'
+} from 'firebase/firestore';
+import { db } from '../firebase';
+import {
+  applyJylySet,
+  isJylyFinished,
+  sumJylyPoints,
+  JYLY_MAX_SETS,
+  type JylyState,
+} from './JylyEngine';
 
-// ---- Types ----
-export type Game = 'JYLY' | 'ATW' | 'LADDER' | 'T21' | 'RACE'
+// ---------- Tüübid ----------
+export type Game = 'JYLY' | 'ATW' | 'LADDER' | 'T21' | 'RACE';
 
 export type Player = {
-  uid: string
-  name: string
-  photoURL?: string
-  // server-side scoreboard
-  totalPoints: number
-  // game-specific local state we hoian minimaalsena
-  jyly?: { makes: number[] } // iga set = 0..5, max 20 kirjet
-}
+  uid: string;
+  name: string;
+  photoURL?: string;
+  jyly?: JylyState;
+  totalPoints?: number;
+  joinedAt?: any;
+  status?: 'lobby' | 'live' | 'done';
+};
 
 export type Session = {
-  id: string
-  name?: string | null
-  code: string
-  game: Game
-  ownerUid: string
-  status: 'lobby' | 'live' | 'done'
-  createdAt?: any
-  players: Player[]
+  id: string;
+  code: string;
+  ownerUid: string;
+  game: Game;
+  name?: string;
+  createdAt?: any;
+  status: 'lobby' | 'live' | 'closed';
+  players: Player[];
+};
+
+// ---------- Abifunktsioonid ----------
+function randomCode(len = 5): string {
+  const alphabet = 'ABCDEFGHJKMNPQRSTUVWXZ123456789';
+  return Array.from({ length: len })
+    .map(() => alphabet[Math.floor(Math.random() * alphabet.length)])
+    .join('');
 }
 
-// ---- Helpers ----
-const SESSIONS = collection(db, 'sessions')
-const LEADERBOARD = collection(db, 'leaderboard')
+// ---------- Loome / liitume ----------
+export async function createSession(
+  ownerUid: string,
+  name?: string,
+  game: Game = 'JYLY'
+): Promise<{ id: string; code: string }> {
+  const code = randomCode(5);
 
-function randomCode(n = 5) {
-  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
-  return Array.from({ length: n }, () => alphabet[Math.floor(Math.random() * alphabet.length)]).join('')
-}
-
-function ensurePlayer(p: Partial<Player>): Player {
-  return {
-    uid: String(p.uid),
-    name: p.name || 'Player',
-    photoURL: p.photoURL || undefined,
-    totalPoints: p.totalPoints ?? 0,
-    jyly: p.jyly ?? { makes: [] },
-  }
-}
-
-// ---- API ----
-
-// Loob sessiooni, EI liitu automaatselt
-export async function createSession(ownerUid: string, game: Game, name?: string) {
-  const code = randomCode(5)
-  const ref = await addDoc(SESSIONS, {
-    name: name || null,
+  const ref = await addDoc(collection(db, 'sessions'), {
     code,
-    game,
     ownerUid,
-    status: 'lobby',
-    players: [],
+    game,
+    name: name || null,
     createdAt: serverTimestamp(),
-  })
-  return { id: ref.id, code }
+    status: 'lobby',
+    players: [] as Player[],
+  });
+
+  return { id: ref.id, code };
 }
 
-export function observeSession(id: string, cb: (s: Session | null) => void): Unsubscribe {
-  const ref = doc(SESSIONS, id)
-  return onSnapshot(ref, (snap) => {
-    if (!snap.exists()) return cb(null)
-    const data = snap.data() as Omit<Session, 'id'>
-    cb({ id: snap.id, ...data })
-  })
-}
+export async function joinSession(sessionId: string, p: Player): Promise<void> {
+  const ref = doc(db, 'sessions', sessionId);
+  await runTransaction(db as any, async (tx: any) => {
+    const snap = await tx.get(ref);
+    if (!snap.exists()) throw new Error('Session not found');
+    const s = snap.data() as Session;
 
-// Lobby/Live list (avalik vaade)
-export function observeOpenSessions(cb: (rows: Session[]) => void): Unsubscribe {
-  // Kui "in" nõuab indeksit, loo see konsoolis; vajadusel kasuta kahte päringut
-  const q = query(SESSIONS, where('status', 'in', ['lobby', 'live']), orderBy('createdAt', 'desc'), limit(50))
-  return onSnapshot(q, (qs) => {
-    cb(qs.docs.map((d) => ({ id: d.id, ...(d.data() as any) })))
-  })
-}
-
-export async function joinSession(sessionId: string, player: Player): Promise<string> {
-  const ref = doc(SESSIONS, sessionId)
-  await runTransaction(db, async (tx) => {
-    const snap = await tx.get(ref)
-    if (!snap.exists()) throw new Error('Session not found')
-    const s = snap.data() as Session
-    const players: Player[] = Array.isArray(s.players) ? s.players.slice() : []
-    const idx = players.findIndex((p) => p.uid === player.uid)
-    if (idx >= 0) {
-      // refresh nimi/foto, ära nulli skoori ega ajalugu
-      const orig = players[idx]
-      players[idx] = { ...orig, name: player.name, photoURL: player.photoURL }
-    } else {
-      players.push(ensurePlayer(player))
+    const players = [...(s.players || [])];
+    const i = players.findIndex((x) => x.uid === p.uid);
+    if (i === -1) {
+      players.push({
+        uid: p.uid,
+        name: p.name,
+        photoURL: p.photoURL,
+        status: 'live',
+        joinedAt: serverTimestamp(),
+      });
     }
-    tx.update(ref, { players, status: 'live' })
-  })
-  return sessionId
+    tx.update(ref, { status: 'live', players });
+  });
 }
 
-export async function joinByCode(code: string, player: Player): Promise<string> {
-  const q = query(SESSIONS, where('code', '==', code), where('status', 'in', ['lobby', 'live']), limit(1))
-  const qs = await getDocs(q)
-  if (qs.empty) throw new Error('Session not found')
-  const id = qs.docs[0].id
-  await joinSession(id, player)
-  return id
+export async function joinByCode(code: string, p: Player): Promise<string> {
+  const qq = query(collection(db, 'sessions'), where('code', '==', code), limit(1));
+  const res = await getDocs(qq);
+  if (res.empty) throw new Error('Session not found');
+  const docSnap = res.docs[0];
+  await joinSession(docSnap.id, p);
+  return docSnap.id;
 }
 
-export async function deleteSession(id: string) {
-  await deleteDoc(doc(SESSIONS, id))
+// ---------- Observe ----------
+export function observeSession(
+  sessionId: string,
+  cb: (s: Session) => void
+): () => void {
+  const ref = doc(db, 'sessions', sessionId);
+  return onSnapshot(ref, (snap) => {
+    if (!snap.exists()) return;
+    const s = { id: snap.id, ...(snap.data() as any) } as Session;
+    cb(s);
+  });
 }
 
-// --- JYLY: salvestame ühe seti (0..5) ---
-// NB: hoian serveris ainult makes[] + totalPoints
-export async function recordJylySet(sessionId: string, uid: string, makesInThisSet: 0 | 1 | 2 | 3 | 4 | 5) {
-  const ref = doc(SESSIONS, sessionId)
-  await runTransaction(db, async (tx) => {
-    const snap = await tx.get(ref)
-    if (!snap.exists()) throw new Error('Session not found')
-    const s = snap.data() as Session
-    const players: Player[] = Array.isArray(s.players) ? s.players.slice() : []
-    const i = players.findIndex((p) => p.uid === uid)
-    if (i < 0) throw new Error('Player not in session')
-
-    const p = ensurePlayer(players[i])
-    const makes = Array.isArray(p.jyly?.makes) ? p.jyly!.makes.slice() : []
-    if (makes.length >= 20) return // ignore üle 20
-
-    makes.push(makesInThisSet)
-    const totalPoints = makes.reduce((a, b) => a + b, 0)
-
-    players[i] = { ...p, totalPoints, jyly: { makes } }
-    tx.update(ref, { players })
-  })
+export function observeOpenSessions(cb: (rooms: Session[]) => void): () => void {
+  const qq = query(
+    collection(db, 'sessions'),
+    where('status', 'in', ['lobby', 'live']),
+    orderBy('createdAt', 'desc'),
+    limit(50)
+  );
+  return onSnapshot(qq, (qs) => {
+    const rooms = qs.docs.map((d) => ({ id: d.id, ...(d.data() as any) } as Session));
+    cb(rooms);
+  });
 }
 
-// Lõpeta sessioon (host) ja salvesta leaderboard’i
-export async function endSessionAndSave(s: Session): Promise<void> {
-  const ref = doc(SESSIONS, s.id)
-  const batch = writeBatch(db)
+// ---------- JYLY: ühe seti salvestus ----------
+export async function recordJylySet(
+  sessionId: string,
+  uid: string,
+  makes: number
+): Promise<void> {
+  if (makes < 0 || makes > 5) throw new Error('Makes must be 0..5');
 
-  // 1) Sessiooni staatus "done"
-  batch.update(ref, { status: 'done' })
+  const ref = doc(db, 'sessions', sessionId);
 
-  // 2) Kirjed leaderboard’i (1 rida per mängija)
-  for (const p of s.players || []) {
-    const rowRef = doc(LEADERBOARD) // auto-id
-    batch.set(rowRef, {
-      sessionId: s.id,
-      sessionName: s.name || null,
-      game: s.game,
-      code: s.code,
-      uid: p.uid,
-      name: p.name,
-      photoURL: p.photoURL || null,
-      score: p.totalPoints || 0,
-      createdAt: serverTimestamp(),
-    })
-  }
+  await runTransaction(db as any, async (tx: any) => {
+    const snap = await tx.get(ref);
+    if (!snap.exists()) throw new Error('Session not found');
 
-  await batch.commit()
+    const s = snap.data() as Session;
+    const players = [...(s.players || [])];
+    const i = players.findIndex((p) => p.uid === uid);
+    if (i === -1) throw new Error('Player not in session');
+
+    const prev = players[i].jyly;
+    if (prev && prev.history.length >= JYLY_MAX_SETS) {
+      // juba valmis
+      return;
+    }
+
+    const next = applyJylySet(prev, makes);
+    const total = sumJylyPoints(next);
+
+    players[i] = {
+      ...players[i],
+      jyly: next,
+      totalPoints: total,
+      status: isJylyFinished(next) ? 'done' : (players[i].status ?? 'live'),
+    };
+
+    tx.update(ref, { players });
+  });
 }
 
-// Globaalne tabel (Top)
-export async function fetchGlobalLeaderboard(limitN = 50) {
-  const q = query(LEADERBOARD, orderBy('score', 'desc'), limit(limitN))
-  const qs = await getDocs(q)
-  return qs.docs.map((d) => ({ id: d.id, ...(d.data() as any) }))
+// ---------- Sessiooni lõpetamine (ainult host) ----------
+export async function endSessionAndSave(sessionId: string): Promise<void> {
+  const ref = doc(db, 'sessions', sessionId);
+  await updateDoc(ref, { status: 'closed' });
+
+  // (soovi korral võiks siia lisada ka globaalse edetabeli salvestuse)
+}
+
+// Lihtne globaalne edetabel (kui soovid kuvada top’i)
+export async function fetchGlobalLeaderboard(limitN = 50): Promise<
+  { name: string; points: number }[]
+> {
+  // Hetkel ei kogu globaalselt; tagastame tühja listi, et UI ei katkeks.
+  return [];
+}
+
+export async function deleteSession(sessionId: string): Promise<void> {
+  await deleteDoc(doc(db, 'sessions', sessionId));
 }

@@ -1,13 +1,10 @@
 // src/App.tsx
-import { useEffect, useMemo, useState } from 'react'
-import { onAuthStateChanged } from 'firebase/auth'
-import create from 'zustand'
+import React, { useEffect, useMemo, useState } from 'react';
+import { onAuthStateChanged } from 'firebase/auth';
+import { auth } from './firebase';
+import SignIn from './components/SignIn';
+import './styles/tailwind.css';
 
-import { auth, completeRedirect } from './firebase'
-import SignIn from './components/SignIn'
-import './styles/tailwind.css'
-
-import { applyJylySet, rebuildJylyFromMakes } from './components/JylyEngine'
 import {
   createSession,
   joinSession,
@@ -15,345 +12,338 @@ import {
   observeSession,
   observeOpenSessions,
   endSessionAndSave,
-  fetchGlobalLeaderboard,
   deleteSession,
   recordJylySet,
   type Session,
   type Player,
   type Game,
-} from './components/session'
+} from './components/session';
 
-import Spectator from './screens/Spectator'
+import { isJylyFinished } from './components/JylyEngine';
 
-type AuthState = { user: any | null }
-const useAuth = create<AuthState>(() => ({ user: null }))
-
-const GAMES: Game[] = ['JYLY', 'ATW', 'LADDER', 'T21', 'RACE']
-const cx = (...xs: (string | false | null | undefined)[]) => xs.filter(Boolean).join(' ')
-
-function mkPlayer(u: any): Player {
-  return {
-    uid: u?.uid,
-    name: u?.displayName || 'Player',
-    photoURL: u?.photoURL || undefined,
-    totalPoints: 0,
-  } as Player
-}
+// ---------- Väike “store” Appi sees ----------
+type AuthUser = { uid: string; displayName: string; photoURL?: string } | null;
 
 export default function App() {
-  // Big-screen: ?screen=<sessionId>
-  const screenId = new URLSearchParams(window.location.search).get('screen')
-  if (screenId) return <Spectator sessionId={screenId} />
+  const [user, setUser] = useState<AuthUser>(null);
+  const [game, setGame] = useState<Game>('JYLY');
 
-  const { user } = useAuth()
-  const [session, setSession] = useState<Session | null>(null)
-  const [openRooms, setOpenRooms] = useState<Session[]>([])
-  const [tab, setTab] = useState<'play' | 'leaderboard'>('play')
-  const [leader, setLeader] = useState<any[]>([])
+  const [roomName, setRoomName] = useState('');
+  const [joinCode, setJoinCode] = useState('');
 
-  const [game, setGame] = useState<Game>('JYLY')
-  const [roomName, setRoomName] = useState('')
-  const [joinCode, setJoinCode] = useState('')
-  const [ending, setEnding] = useState(false)
+  const [session, setSession] = useState<Session | null>(null);
+  const [openRooms, setOpenRooms] = useState<Session[]>([]);
+  const [saving, setSaving] = useState(false);
 
-  // kohalik optimistlik JYLY
-  const [localJyly, setLocalJyly] = useState<any | null>(null)
-
-  // auth
+  // Auth
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, (u) => useAuth.setState({ user: u }))
-    completeRedirect().catch(() => void 0)
-    return () => unsub()
-  }, [])
+    return onAuthStateChanged(auth, (u) => {
+      if (!u) {
+        setUser(null);
+        setSession(null);
+        return;
+      }
+      setUser({
+        uid: u.uid,
+        displayName: u.displayName || u.email || 'User',
+        photoURL: u.photoURL || undefined,
+      });
+    });
+  }, []);
 
-  // lobby/live list
+  // Ava ruumide “lobby/live” vaade
   useEffect(() => {
-    const off = observeOpenSessions((rows) => setOpenRooms(rows || []))
-    return () => off?.()
-  }, [])
+    if (!user || session) return;
+    const off = observeOpenSessions(setOpenRooms);
+    return () => off && off();
+  }, [user, session]);
 
-  // global leaderboard tab
-  useEffect(() => {
-    if (tab !== 'leaderboard') return
-    fetchGlobalLeaderboard().then(setLeader).catch(() => setLeader([]))
-  }, [tab])
+  // --------- Helperid ----------
+  const me: Player | null = useMemo(() => {
+    if (!user || !session) return null;
+    return (session.players || []).find((p) => p.uid === user.uid) || null;
+  }, [user, session]);
 
-  // realtime session
-  useEffect(() => {
-    if (!session?.id) return
-    const off = observeSession(session.id, (s) => setSession(s as any))
-    return () => off?.()
-  }, [session?.id])
+  const iAmOwner = useMemo(
+    () => !!user && !!session && session.ownerUid === user.uid,
+    [user, session]
+  );
 
-  const me = useMemo(() => session?.players?.find((p) => p.uid === user?.uid) || null, [session, user])
-  const isOwner = !!(session && user && session.ownerUid === user.uid)
-
-  // rebuild jyly from server + local overlay
-  const jylyFromServer = useMemo(() => {
-    if (!me) return rebuildJylyFromMakes([])
-    const makes = (me as any)?.jyly?.makes || (Array.isArray((me as any)?.jyly) ? (me as any).jyly : []) || []
-    return rebuildJylyFromMakes(makes)
-  }, [me])
-
-  useEffect(() => setLocalJyly(null), [me?.uid, (me as any)?.jyly?.makes, session?.id])
-
-  const jyly = localJyly ?? jylyFromServer
-  const roundCount = jyly?.history?.length ?? 0
-  const distanceM = jyly?.next?.distanceM ?? 10
-
-  async function handleCreateRoom() {
-    if (!user) return alert('Logi sisse, et ruumi luua.')
-    try {
-      await createSession(user.uid, game, roomName || undefined) // ei liitu automaatselt
-      alert('Room created. Join when ready.')
-    } catch (e: any) {
-      alert('Create room failed: ' + (e?.message || String(e)))
-    }
+  // --------- Toimingud ----------
+  async function handleCreate() {
+    if (!user) return;
+    const { id } = await createSession(user.uid, roomName, game);
+    // NB! ei tee auto-joini
+    alert('Room created. Join when ready.');
+    setRoomName('');
   }
 
   async function handleJoinByCode() {
-    if (!user) return alert('Logi sisse.')
-    if (!joinCode.trim()) return alert('Sisesta kood.')
+    if (!user || !joinCode) return;
+    const p: Player = {
+      uid: user.uid,
+      name: user.displayName,
+      photoURL: user.photoURL,
+      status: 'live',
+    };
+    const sessionId = await joinByCode(joinCode.trim().toUpperCase(), p);
+    const off = observeSession(sessionId, setSession);
+    // puhasta vanad kuulajad, kui läheme tagasi lobby-sse
+    return () => off && off();
+  }
+
+  async function handleJoinRoom(s: Session) {
+    if (!user) return;
+    const p: Player = {
+      uid: user.uid,
+      name: user.displayName,
+      photoURL: user.photoURL,
+      status: 'live',
+    };
+    await joinSession(s.id, p);
+    const off = observeSession(s.id, setSession);
+    return () => off && off();
+  }
+
+  async function submitMakes(n: number) {
+    if (!user || !session) return;
     try {
-      const sid = await joinByCode(joinCode.trim().toUpperCase(), mkPlayer(user))
-      const off = observeSession(sid, (s) => setSession(s as any))
-      return () => off?.()
-    } catch (e: any) {
-      alert('Join failed: ' + (e?.message || String(e)))
-    }
-  }
-
-  async function handleJoin(id: string) {
-    if (!user) return alert('Logi sisse.')
-    try {
-      await joinSession(id, mkPlayer(user))
-      const off = observeSession(id, (s) => setSession(s as any))
-      return () => off?.()
-    } catch (e: any) {
-      alert('Join failed: ' + (e?.message || String(e)))
-    }
-  }
-
-  function leaveRoom() {
-    setSession(null) // kohalik tagasi lobby'sse
-  }
-
-  async function handleSpectate(id: string) {
-    const url = new URL(window.location.href)
-    url.searchParams.set('screen', id)
-    window.location.assign(url.toString())
-  }
-
-  async function handleDelete(id: string) {
-    if (!user) return
-    try {
-      await deleteSession(id)
-    } catch (e: any) {
-      alert('Delete failed: ' + (e?.message || String(e)))
+      setSaving(true);
+      await recordJylySet(session.id, user.uid, n);
+    } finally {
+      setSaving(false);
     }
   }
 
   async function handleEndSession() {
-    if (!session) return
-    if (!isOwner) return alert('Ainult ruumi looja saab sessiooni lõpetada.')
+    if (!session) return;
     try {
-      setEnding(true)
-      await endSessionAndSave(session)
-      alert('Session ended and saved to leaderboard.')
+      setSaving(true);
+      await endSessionAndSave(session.id);
+      alert('Session ended.');
+      setSession(null);
     } catch (e: any) {
-      alert('End session failed: ' + (e?.message || String(e)))
+      alert(`End session failed: ${e?.message || e}`);
     } finally {
-      setEnding(false)
+      setSaving(false);
     }
   }
 
-  async function setJyly(n: 0 | 1 | 2 | 3 | 4 | 5) {
-    if (!session || !user) return
-    if ((jyly?.history?.length ?? 0) >= 20) return // max 20 setti
-
-    try {
-      const next = applyJylySet(jyly, n)
-      setLocalJyly(next) // optimistlik UI
-      await recordJylySet(session.id, user.uid, n) // püsiv salvestus
-    } catch (e: any) {
-      setLocalJyly(null)
-      alert('Save failed: ' + (e?.message || String(e)))
-    }
-  }
-
-  // --------- render ----------
+  // --------- UI osad ----------
   if (!user) {
     return (
       <div className="min-h-screen bg-black text-white flex items-center justify-center">
-        <div className="w-full max-w-sm p-6">
-          <h1 className="text-2xl font-bold mb-6">PuttApp</h1>
         <SignIn />
-        </div>
       </div>
-    )
+    );
   }
 
-  if (session) {
-    const isHost = isOwner
+  // Lobby ekraan
+  if (!session) {
     return (
       <div className="min-h-screen bg-black text-white">
-        <div className="max-w-3xl mx-auto px-4 py-6 space-y-6">
-          <div className="flex justify-between items-start">
-            <div>
-              <div className="text-2xl font-bold">{session.name || 'Session'}</div>
-              <div className="text-neutral-400">
-                {session.game} • Code: <span className="font-mono">{session.code}</span>
-              </div>
-            </div>
-            <div className="flex items-center gap-3">
-              <button className="px-4 py-2 rounded-2xl bg-neutral-800 hover:bg-neutral-700" onClick={leaveRoom}>
-                Leave room
-              </button>
-              {isHost ? (
+        <div className="mx-auto max-w-4xl p-6">
+          <div className="flex justify-between items-center mb-6">
+            <div className="text-2xl font-bold">PuttApp</div>
+            <div className="opacity-80">Hi, {user.displayName} 👋</div>
+          </div>
+
+          <div className="rounded-2xl border border-neutral-800 p-6 space-y-4">
+            <div className="text-lg font-semibold">Create a room</div>
+
+            <div className="flex gap-2">
+              {(['JYLY', 'ATW', 'LADDER', 'T21', 'RACE'] as Game[]).map((g) => (
                 <button
-                  className={cx('px-4 py-2 rounded-2xl font-semibold', ending ? 'bg-neutral-700' : 'bg-red-600 hover:bg-red-500')}
-                  onClick={handleEndSession}
-                  disabled={ending}
+                  key={g}
+                  onClick={() => setGame(g)}
+                  className={`px-4 py-2 rounded-xl ${
+                    game === g ? 'bg-sky-600 text-white' : 'bg-neutral-800'
+                  }`}
                 >
-                  {ending ? 'Saving…' : 'End Session → Save'}
+                  {g}
                 </button>
-              ) : (
-                <button className="px-4 py-2 rounded-2xl bg-neutral-800 text-neutral-400 cursor-not-allowed" title="Only the host can end the session" disabled>
-                  End Session
-                </button>
-              )}
+              ))}
+            </div>
+
+            <input
+              value={roomName}
+              onChange={(e) => setRoomName(e.target.value)}
+              className="w-full rounded-xl bg-neutral-900 px-4 py-3"
+              placeholder="Room name (optional)"
+            />
+
+            <button
+              onClick={handleCreate}
+              className="w-full bg-sky-600 hover:bg-sky-500 rounded-xl py-3 font-semibold"
+            >
+              Create {game} Room
+            </button>
+
+            <div className="flex gap-2 pt-2">
+              <input
+                value={joinCode}
+                onChange={(e) => setJoinCode(e.target.value)}
+                className="flex-1 rounded-xl bg-neutral-900 px-4 py-3"
+                placeholder="Join with code"
+              />
+              <button
+                onClick={handleJoinByCode}
+                className="px-5 rounded-xl bg-neutral-800"
+              >
+                Join
+              </button>
             </div>
           </div>
 
-          {/* JYLY */}
-          {session.game === 'JYLY' && (
-            <div className="rounded-2xl border border-neutral-800 p-4">
-              <div className="flex items-center justify-between mb-3">
-                <div className="text-4xl font-bold">{distanceM} m</div>
-                <div className="text-sm text-neutral-400 font-mono">{(jyly?.history?.length ?? 0)} / 20</div>
-              </div>
-              <div className="text-neutral-300 mb-3">Put from here • Enter your makes (0–5)</div>
-              <div className="flex gap-3">
-                {[0,1,2,3,4,5].map((k) => (
-                  <button
-                    key={k}
-                    onClick={() => setJyly(k as 0|1|2|3|4|5)}
-                    className="w-12 h-12 rounded-xl flex items-center justify-center font-semibold bg-neutral-800 hover:bg-neutral-700"
-                  >
-                    {k}
-                  </button>
-                ))}
-              </div>
-
-              <div className="mt-4 text-sm text-neutral-400">
-                Points: <span className="text-white font-semibold">{(me?.totalPoints ?? 0) as number}</span>
-              </div>
-
-              {Array.isArray(jyly?.history) && jyly.history.length > 0 && (
-                <div className="mt-3 text-sm text-neutral-400">
-                  History: {jyly.history.map((v: number, i: number) => `${i + 1}) ${v}/5`).join(' • ')}
+          <div className="mt-8 rounded-2xl border border-neutral-800 p-6">
+            <div className="text-lg font-semibold mb-3">Available rooms</div>
+            {openRooms.length === 0 && <div className="opacity-60">No rooms yet.</div>}
+            <div className="space-y-2">
+              {openRooms.map((r) => (
+                <div
+                  key={r.id}
+                  className="flex items-center justify-between bg-neutral-900 rounded-xl p-4"
+                >
+                  <div className="space-y-1">
+                    <div className="font-semibold">{r.name || 'Untitled'}</div>
+                    <div className="text-sm opacity-70">
+                      {r.game} • Code: {r.code} • Players: {r.players?.length || 0}
+                    </div>
+                  </div>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => handleJoinRoom(r)}
+                      className="px-4 py-2 rounded-xl bg-neutral-800"
+                    >
+                      Join
+                    </button>
+                    {iAmOwner && r.status !== 'closed' && r.ownerUid === user.uid ? (
+                      <button
+                        onClick={() => deleteSession(r.id)}
+                        className="px-4 py-2 rounded-xl bg-red-900/60"
+                      >
+                        Delete
+                      </button>
+                    ) : null}
+                  </div>
                 </div>
-              )}
+              ))}
             </div>
-          )}
+          </div>
+        </div>
+      </div>
+    );
+  }
 
-          {/* sessiooni leaderboard */}
-          <div className="rounded-2xl border border-neutral-800">
-            <div className="px-4 py-3 text-neutral-400">Leaderboard</div>
-            {(session.players || [])
-              .slice()
+  // Session ekraan
+  const myJyly = me?.jyly;
+  const myLast =
+    myJyly && myJyly.history.length > 0
+      ? myJyly.history[myJyly.history.length - 1]
+      : undefined;
+  const myDistance = myJyly?.distanceM ?? 10;
+  const myDone = !!myJyly && isJylyFinished(myJyly);
+
+  return (
+    <div className="min-h-screen bg-black text-white">
+      <div className="mx-auto max-w-4xl p-6">
+        <div className="flex justify-between items-center mb-4">
+          <div className="space-y-1">
+            <div className="text-2xl font-bold">{session.name || 'Session'}</div>
+            <div className="opacity-70 text-sm">
+              {session.game} • Code: {session.code}
+            </div>
+          </div>
+
+          <div className="flex items-center gap-3">
+            {iAmOwner && session.status !== 'closed' ? (
+              <button
+                onClick={handleEndSession}
+                className="bg-red-600 hover:bg-red-500 rounded-xl px-4 py-2"
+              >
+                End Session → Save
+              </button>
+            ) : null}
+          </div>
+        </div>
+
+        {/* JYLY sisestus */}
+        {session.game === 'JYLY' && me && (
+          <div className="rounded-2xl border border-neutral-800 p-6 mb-8">
+            <div className="text-3xl font-bold mb-2">{myDistance} m</div>
+            <div className="opacity-70 mb-4">
+              Put from here • Enter your makes (0–5){' '}
+              {saving ? <span className="ml-2 opacity-60">Saving…</span> : null}
+            </div>
+
+            <div className="flex gap-3">
+              {[0, 1, 2, 3, 4, 5].map((n) => {
+                const isLast = myLast?.makes === n;
+                return (
+                  <button
+                    key={n}
+                    disabled={myDone || session.status === 'closed'}
+                    onClick={() => submitMakes(n)}
+                    className={`w-16 h-16 rounded-2xl text-xl font-semibold ${
+                      isLast ? 'bg-neutral-700' : 'bg-neutral-800'
+                    } ${myDone ? 'opacity-50' : ''}`}
+                  >
+                    {n}
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="mt-4 text-sm opacity-80">
+              Points: <span className="font-semibold">{me.totalPoints || 0}</span> •{' '}
+              Sets: {myJyly?.history.length || 0}/20
+            </div>
+
+            {myJyly && myJyly.history.length > 0 && (
+              <div className="mt-3 text-sm opacity-70">
+                History:{' '}
+                {myJyly.history
+                  .map(
+                    (h, i) => `${i + 1}) ${h.makes}/5 @${h.distanceM}m (+${h.points})`
+                  )
+                  .join(' · ')}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Leaderboard */}
+        <div className="rounded-2xl border border-neutral-800">
+          <div className="p-4 font-semibold">Leaderboard</div>
+          <div className="divide-y divide-neutral-900">
+            {[...(session.players || [])]
               .sort((a, b) => (b.totalPoints || 0) - (a.totalPoints || 0))
               .map((p) => (
-                <div key={p.uid} className="flex items-center justify-between px-4 py-3 border-t border-neutral-900">
+                <div
+                  key={p.uid}
+                  className="px-4 py-3 flex items-center justify-between"
+                >
                   <div className="flex items-center gap-3">
                     <div className="w-8 h-8 rounded-full bg-neutral-800" />
                     <div>
-                      <div className="font-medium">{p.name}</div>
-                      <div className="text-xs text-neutral-500">{p.uid === user.uid ? 'You' : ''}</div>
+                      <div className="font-medium">
+                        {p.name} {p.uid === user!.uid ? <span className="opacity-60">• You</span> : null}
+                      </div>
+                      <div className="text-xs opacity-60">
+                        {p.status === 'done'
+                          ? 'Finished'
+                          : p.status === 'live'
+                          ? 'Playing'
+                          : 'Joined'}
+                      </div>
                     </div>
                   </div>
-                  <div className="text-lg font-semibold">{p.totalPoints || 0}</div>
+                  <div className="text-xl font-bold">{p.totalPoints || 0}</div>
                 </div>
               ))}
           </div>
         </div>
       </div>
-    )
-  }
-
-  // Lobby
-  return (
-    <div className="min-h-screen bg-black text-white">
-      <div className="max-w-3xl mx-auto px-4 py-6 space-y-6">
-        <div className="flex items-center gap-2">
-          <button className={cx('px-4 py-2 rounded-2xl', tab === 'play' ? 'bg-sky-600' : 'bg-neutral-800')} onClick={() => setTab('play')}>
-            Play
-          </button>
-        </div>
-
-        {/* Create room */}
-        <div className="rounded-2xl border border-neutral-800 p-4 space-y-3">
-          <div className="text-neutral-300">Create a room</div>
-
-          <div className="flex flex-wrap gap-3">
-            {GAMES.map((g) => (
-              <button key={g} onClick={() => setGame(g)} className={cx('px-4 py-2 rounded-2xl', game === g ? 'bg-sky-600' : 'bg-neutral-800')}>
-                {g}
-              </button>
-            ))}
-          </div>
-
-          <input
-            className="w-full mt-2 rounded-xl bg-neutral-900 border border-neutral-800 px-3 py-2"
-            placeholder="Room name (optional)"
-            value={roomName}
-            onChange={(e) => setRoomName(e.target.value)}
-          />
-
-          <button onClick={handleCreateRoom} className="w-full mt-2 px-4 py-3 rounded-xl bg-sky-600 hover:bg-sky-500 font-semibold">
-            Create {game} Room
-          </button>
-
-          <div className="mt-4 flex gap-3">
-            <input
-              value={joinCode}
-              onChange={(e) => setJoinCode(e.target.value.toUpperCase())}
-              className="flex-1 rounded-xl bg-neutral-900 border border-neutral-800 px-3 py-2"
-              placeholder="Join with code"
-            />
-            <button onClick={handleJoinByCode} className="px-4 rounded-xl bg-neutral-800 hover:bg-neutral-700">
-              Join
-            </button>
-          </div>
-        </div>
-
-        {/* Available rooms */}
-        <div className="rounded-2xl border border-neutral-800">
-          <div className="px-4 py-3 text-neutral-400">Available rooms</div>
-          {(openRooms || []).length === 0 && <div className="px-4 py-6 text-neutral-500">No rooms yet.</div>}
-          {(openRooms || []).map((r) => (
-            <div key={r.id} className="flex items-center justify-between px-4 py-3 border-t border-neutral-900">
-              <div>
-                <div className="font-medium">{(r as any).name || r.game} • {r.code}</div>
-                <div className="text-xs text-neutral-500">Players: {r.players?.length || 0}</div>
-              </div>
-              <div className="flex items-center gap-2">
-                <button className="px-3 py-1.5 rounded-xl bg-neutral-800 hover:bg-neutral-700" onClick={() => handleJoin(r.id)}>
-                  Join
-                </button>
-                <button className="px-3 py-1.5 rounded-xl bg-neutral-800 hover:bg-neutral-700" onClick={() => handleSpectate(r.id)}>
-                  Spectate
-                </button>
-                {r.ownerUid === user.uid && (
-                  <button className="px-3 py-1.5 rounded-xl bg-red-600 hover:bg-red-500" onClick={() => handleDelete(r.id)}>
-                    Delete
-                  </button>
-                )}
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
     </div>
-  )
+  );
 }
