@@ -41,13 +41,10 @@ const GAMES: Game[] = ['JYLY', 'ATW', 'LADDER', 'T21', 'RACE']
 
 // kui URL-is on ?screen=<sessionId>, näita big-screen vaadet
 const screenId = new URLSearchParams(location.search).get('screen')
-if (screenId) return <Spectator sessionId={screenId} />
-
 
 export default function App() {
   /* SCREEN_CHECK */
   const screenId = new URLSearchParams(window.location.search).get('screen');
-  if (screenId) return <Spectator sessionId={screenId} />;
 
   const { user } = useAuth()
   const [session, setSession] = useState<Session | null>(null)
@@ -282,8 +279,7 @@ export default function App() {
     </div>
   )
 }
-
-function Spectator({ session }: { session: Session }) {
+/* LOCAL_SPECTATOR_REMOVED function Spectator({ session }: { session: Session }) {
   return (
     <div className="max-w-2xl mx-auto p-6">
       <div className="text-2xl font-bold mb-2">{session.game} • {session.name || session.code}</div>
