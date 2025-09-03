@@ -9,7 +9,6 @@ import {
   createSession,
   joinSession,
   joinByCode,
-  observeSession,
   observeOpenSessions,
   endSessionAndSave,
   deleteSession,
@@ -54,8 +53,8 @@ export default function App() {
   // Ava ruumide “lobby/live” vaade
   useEffect(() => {
     if (!user || session) return;
-    const off = observeOpenSessions(setOpenRooms);
-    return () => off && off();
+    const off = observeOpenSessions((rows) => setOpenRooms(rows || []));
+    return () => off?.();
   }, [user, session]);
 
   // --------- Helperid ----------
@@ -70,27 +69,46 @@ export default function App() {
   );
 
   // --------- Toimingud ----------
-  async function handleCreate() {
-    if (!user) return;
-    const { id } = await createSession(user.uid, roomName, game);
-    // NB! ei tee auto-joini
-    alert('Room created. Join when ready.');
-    setRoomName('');
+  async function handleCreateRoom() {
+    if (!user) {
+      alert('Please sign in first.');
+      return;
+    }
+    try {
+      await createSession(user.uid, game, roomName.trim() || undefined);
+      alert('Room created. Share the code and press Join when ready.');
+      setRoomName('');
+    } catch (e: any) {
+      console.error(e);
+      alert(`Create failed: ${e.message ?? e}`);
+    }
   }
 
   async function handleJoinByCode() {
-    if (!user || !joinCode) return;
-    const p: Player = {
+    if (!user) {
+      alert('Please sign in first.');
+      return;
+    }
+    const code = joinCode.trim().toUpperCase();
+    if (!code) return;
+  
+    const player: Player = {
       uid: user.uid,
-      name: user.displayName,
-      photoURL: user.photoURL,
-      status: 'live',
+      name: user.displayName || 'Player',
+      photoURL: user.photoURL || undefined,
+      totalPoints: 0,
     };
-    const sessionId = await joinByCode(joinCode.trim().toUpperCase(), p);
-    const off = observeSession(sessionId, setSession);
-    // puhasta vanad kuulajad, kui läheme tagasi lobby-sse
-    return () => off && off();
+  
+    try {
+      await joinByCode(code, player);
+      // your session observer will take over; optionally clear field
+      setJoinCode('');
+    } catch (e: any) {
+      console.error(e);
+      alert(`Join failed: ${e.message ?? e}`);
+    }
   }
+  
 
   async function handleJoinRoom(s: Session) {
     if (!user) return;
@@ -101,8 +119,9 @@ export default function App() {
       status: 'live',
     };
     await joinSession(s.id, p);
-    const off = observeSession(s.id, setSession);
-    return () => off && off();
+    // Directly set the session to the room object we just joined.
+    // For real-time updates consider adding an observeSession export to ./components/session.
+    setSession(s);
   }
 
   async function submitMakes(n: number) {
@@ -173,7 +192,7 @@ export default function App() {
             />
 
             <button
-              onClick={handleCreate}
+              onClick={handleCreateRoom}
               className="w-full bg-sky-600 hover:bg-sky-500 rounded-xl py-3 font-semibold"
             >
               Create {game} Room

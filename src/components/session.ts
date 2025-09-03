@@ -3,17 +3,19 @@ import {
   addDoc,
   collection,
   deleteDoc,
-  doc,
+  doc as fsDoc,
   getDocs,
   limit,
   onSnapshot,
   orderBy,
+  arrayUnion,
   query,
   runTransaction,
   serverTimestamp,
   setDoc,
   updateDoc,
   where,
+  Firestore,
 } from 'firebase/firestore';
 import { db } from '../firebase';
 import {
@@ -23,6 +25,27 @@ import {
   JYLY_MAX_SETS,
   type JylyState,
 } from './JylyEngine';
+
+export function observeSession(
+  sessionId: string,
+  cb: (s: Session | null) => void
+): () => void {
+  const ref = fsDoc(db, 'sessions', sessionId);
+  return onSnapshot(
+    ref,
+    (snap) => {
+      if (!snap.exists()) {
+        cb(null);
+      } else {
+        cb({ id: snap.id, ...(snap.data() as any) } as Session);
+      }
+    },
+    (err) => {
+      console.error('observeSession', err);
+      cb(null);
+    }
+  );
+}
 
 // ---------- Tüübid ----------
 export type Game = 'JYLY' | 'ATW' | 'LADDER' | 'T21' | 'RACE';
@@ -57,28 +80,21 @@ function randomCode(len = 5): string {
 }
 
 // ---------- Loome / liitume ----------
-export async function createSession(
-  ownerUid: string,
-  name?: string,
-  game: Game = 'JYLY'
-): Promise<{ id: string; code: string }> {
-  const code = randomCode(5);
-
+export async function createSession(ownerUid: string, game: Game, name?: string): Promise<string> {
   const ref = await addDoc(collection(db, 'sessions'), {
-    code,
     ownerUid,
     game,
-    name: name || null,
-    createdAt: serverTimestamp(),
+    name: name ?? null,
+    code: randomCode(5),
     status: 'lobby',
-    players: [] as Player[],
+    createdAt: serverTimestamp(), // <- lets us order without composite index
+    players: [],
   });
-
-  return { id: ref.id, code };
+  return ref.id;
 }
 
 export async function joinSession(sessionId: string, p: Player): Promise<void> {
-  const ref = doc(db, 'sessions', sessionId);
+  const ref = fsDoc(db, 'sessions', sessionId);
   await runTransaction(db as any, async (tx: any) => {
     const snap = await tx.get(ref);
     if (!snap.exists()) throw new Error('Session not found');
@@ -99,39 +115,37 @@ export async function joinSession(sessionId: string, p: Player): Promise<void> {
   });
 }
 
-export async function joinByCode(code: string, p: Player): Promise<string> {
-  const qq = query(collection(db, 'sessions'), where('code', '==', code), limit(1));
-  const res = await getDocs(qq);
-  if (res.empty) throw new Error('Session not found');
-  const docSnap = res.docs[0];
-  await joinSession(docSnap.id, p);
-  return docSnap.id;
+export async function joinByCode(code: string, player: Player): Promise<string> {
+  const qy = query(collection(db, 'sessions'), where('code', '==', code.toUpperCase()));
+  const snap = await getDocs(qy);
+  if (snap.empty) throw new Error('Session not found');
+
+  const docSnap = snap.docs[0];
+  const id = docSnap.id;
+
+  await updateDoc(fsDoc(db, 'sessions', id), {
+    status: 'live',
+    players: arrayUnion(player),
+  });
+
+  return id;
 }
 
 // ---------- Observe ----------
-export function observeSession(
-  sessionId: string,
-  cb: (s: Session) => void
-): () => void {
-  const ref = doc(db, 'sessions', sessionId);
-  return onSnapshot(ref, (snap) => {
-    if (!snap.exists()) return;
-    const s = { id: snap.id, ...(snap.data() as any) } as Session;
-    cb(s);
-  });
-}
-
 export function observeOpenSessions(cb: (rooms: Session[]) => void): () => void {
-  const qq = query(
-    collection(db, 'sessions'),
-    where('status', 'in', ['lobby', 'live']),
-    orderBy('createdAt', 'desc'),
-    limit(50)
+  const qy = query(collection(db, 'sessions'), orderBy('createdAt', 'desc'), limit(50));
+  return onSnapshot(
+    qy,
+    (qs) => {
+      const all = qs.docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as Session[];
+      const rooms = all.filter((r) => r.status === 'lobby' || r.status === 'live');
+      cb(rooms);
+    },
+    (err) => {
+      console.error('observeOpenSessions', err);
+      cb([]);
+    },
   );
-  return onSnapshot(qq, (qs) => {
-    const rooms = qs.docs.map((d) => ({ id: d.id, ...(d.data() as any) } as Session));
-    cb(rooms);
-  });
 }
 
 // ---------- JYLY: ühe seti salvestus ----------
@@ -142,7 +156,7 @@ export async function recordJylySet(
 ): Promise<void> {
   if (makes < 0 || makes > 5) throw new Error('Makes must be 0..5');
 
-  const ref = doc(db, 'sessions', sessionId);
+  const ref = fsDoc(db, 'sessions', sessionId);
 
   await runTransaction(db as any, async (tx: any) => {
     const snap = await tx.get(ref);
@@ -175,7 +189,7 @@ export async function recordJylySet(
 
 // ---------- Sessiooni lõpetamine (ainult host) ----------
 export async function endSessionAndSave(sessionId: string): Promise<void> {
-  const ref = doc(db, 'sessions', sessionId);
+  const ref = fsDoc(db, 'sessions', sessionId);
   await updateDoc(ref, { status: 'closed' });
 
   // (soovi korral võiks siia lisada ka globaalse edetabeli salvestuse)
@@ -190,5 +204,6 @@ export async function fetchGlobalLeaderboard(limitN = 50): Promise<
 }
 
 export async function deleteSession(sessionId: string): Promise<void> {
-  await deleteDoc(doc(db, 'sessions', sessionId));
+  await deleteDoc(fsDoc(db, 'sessions', sessionId));
 }
+
